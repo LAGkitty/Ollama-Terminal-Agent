@@ -92,6 +92,7 @@ An autonomous terminal agent that uses locally running [Ollama](https://ollama.c
 ```
 
 ---
+(Alex is not a real name)
 
 ## Features
 
