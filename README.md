@@ -2,7 +2,7 @@
 
 An autonomous terminal agent powered by a **locally running Ollama model**.
 
-Describe a task in plain English — it plans the steps, runs real shell commands, reads the output, fixes errors, and continues until the task is fully complete.
+Describe a task, it plans the steps, runs real shell commands, reads the output, fixes errors, and continues until the task is fully complete.
 
 ✅ 100% local  
 ✅ No API keys  
