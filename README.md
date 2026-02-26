@@ -1,3 +1,5 @@
+[<img src="https://ko-fi.com/img/githubbutton_sm.svg">](https://ko-fi.com/lagkitty)
+
 # 🤖 Ollama Terminal
 
 An autonomous terminal agent powered by a **locally running Ollama model**.
