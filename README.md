@@ -2,34 +2,17 @@
 
 An autonomous terminal agent powered by a **locally running Ollama model**.
 
-Describe a goal in plain English — the agent plans the steps, executes real shell commands, reads the output, self-corrects on errors, and continues until the task is truly complete.
+Describe a task in plain English — it plans the steps, runs real shell commands, reads the output, fixes errors, and continues until the task is fully complete.
 
 ✅ 100% local  
 ✅ No API keys  
 ✅ No cloud  
 ✅ No data leaves your machine  
 
-
 (If you don't trust this .py file... you can always just upload to a AI and will tell you if its safe or not)
-
 ---
 
-## 🚀 What It Does
-
-`ollama_terminal.py` turns your local LLM into a self-correcting command-line agent that can:
-
-- Create projects
-- Install software
-- Manage files
-- Debug issues
-- Run system maintenance
-- Automate multi-step workflows
-
-All directly inside your real shell environment.
-
----
-
-## 🖥 Demo
+## 🖥 Full Demo
 
 ```
 ╔══════════════════════════════════════════╗
@@ -39,7 +22,7 @@ All directly inside your real shell environment.
 ● Ollama: running   2 model(s)
 
 Main Menu
-──────────────────────────────────────────
+──────────────────────────────────────────────────────────
 1. ▶ Run Task              auto-select model
 2. ⚙ Run Task              choose model manually
 3. ⭐ Saved Tasks
@@ -48,110 +31,98 @@ Main Menu
 6. ✏ Custom Instructions
 7. ⟳ Start Ollama
 0. Exit
-──────────────────────────────────────────
+──────────────────────────────────────────────────────────
 Choice: 1
 
 Auto-selected: llama3:latest
 
 What do you want me to do?
 > set up a python project called weather-cli with a venv, install requests, and write a hello world script
+
+Connected (chat)
+
+──────────────────────────────────────────────────────────
+Model: llama3:latest
+Task:  set up a python project called weather-cli with a venv, install requests, and write a hello world script
+──────────────────────────────────────────────────────────
+
+Step 1  explore home directory
+┌─ $ ls /home/alex
+│ Desktop  Documents  Downloads  Music  Pictures
+└─ ✓
+
+Step 2  create project folder
+┌─ $ mkdir -p /home/alex/Documents/weather-cli
+└─ ✓
+
+Step 3  create virtual environment
+┌─ $ python3 -m venv /home/alex/Documents/weather-cli/venv
+└─ ✓
+
+Step 4  install requests into venv
+┌─ $ /home/alex/Documents/weather-cli/venv/bin/pip install requests
+│ Successfully installed requests
+└─ ✓
+
+Step 5  write hello world script
+
+❓ Agent asks: Should the script print to stdout or write to a log file?
+   Your answer: stdout is fine
+
+┌─ $ printf 'print("Hello from weather-cli!")\n' > /home/alex/Documents/weather-cli/main.py
+└─ ✓
+
+Step 6  verify script runs correctly
+┌─ $ /home/alex/Documents/weather-cli/venv/bin/python main.py
+│ Hello from weather-cli!
+└─ ✓
+
+══════════════════════════════════════════════════════════
+✓  Task complete!
+
+Created weather-cli project with venv, installed requests,
+wrote and verified main.py — all in /home/alex/Documents/weather-cli
+══════════════════════════════════════════════════════════
+
+Save as a saved task? [y/N]: y
+✓ Saved!
 ```
 
-The agent will:
-
-- Explore directories
-- Create folders
-- Create virtual environments
-- Install dependencies
-- Write files
-- Verify output
-- Fix errors if needed
-- Declare completion only when everything works
+(Alex is just an example name.)
 
 ---
 
-## ✨ Features
+## 🚀 What It Can Do
 
-### 🧠 Autonomous Execution Loop
-- Model replies in strict JSON
-- Executes commands
-- Streams live stdout/stderr
-- Feeds results back to model
-- Repeats until task is done
+- Create projects
+- Install packages
+- Manage files
+- Debug errors
+- Run system maintenance
+- Use web search when necessary
+- Break large tasks into safe, small steps
 
----
-
-### 🔄 Self-Correcting
-If a command fails:
-- The error is sent back to the model
-- The model adjusts strategy
-- It never repeats the exact same failing command
+Everything runs in your real shell.
 
 ---
 
-### 📡 Live Streaming Output
-Every command prints output line-by-line in real time.
+## ✨ Core Features
 
----
-
-### ⚙ Smart System Awareness
-Automatically injects:
-- Your username
-- Home directory
-- Operating system
-- Default shell
-- Current working directory
-- Detected package managers
-
-So paths are always correct.
-
----
-
-### 🔍 Built-in Web Search (Optional)
-- Uses DuckDuckGo via `ddgs`
-- Auto-installs if missing
-- Falls back gracefully if unavailable
-
----
-
-### 🛠 Custom Instructions
-Persistent rules stored in:
-
-```
-~/.ollama_terminal_config.json
-```
-
-Examples:
-
-```
-prefer python3 over python
-always use pip3
-never use sudo without asking me
-my projects folder is ~/Documents/projects
-```
-
----
-
-### 💾 Saved Tasks
-Save commonly used tasks and re-run instantly.
-
----
-
-### 🤖 Auto Model Selection
-- Picks the best installed model automatically
-- Or manually choose one
-
----
-
-### 🔄 JSON Recovery System
-If malformed JSON is produced:
-- Retries up to `MAX_JSON_RETRIES`
-- Hard resets after limit
-
----
-
-### 🧹 Context Trimming
-Prevents context window overflow by limiting conversation history (`MAX_HISTORY_MSGS`).
+- Autonomous execution loop
+- Live streaming command output
+- Self-correcting on errors
+- Strict JSON action format
+- Auto-detects:
+  - Username
+  - Home directory
+  - OS
+  - Shell
+  - Current working directory
+  - Available package managers
+- Saved tasks
+- Custom persistent instructions
+- Auto-starts Ollama if needed
+- Works with most Ollama models
 
 ---
 
@@ -159,7 +130,7 @@ Prevents context window overflow by limiting conversation history (`MAX_HISTORY_
 
 - Python 3.8+
 - Ollama installed
-- `requests` Python library
+- `requests` library
 
 Install dependency:
 
@@ -167,50 +138,35 @@ Install dependency:
 pip install requests
 ```
 
----
-
-## 📥 Installation
+Pull at least one model:
 
 ```bash
-git clone https://github.com/yourname/ollama-terminal.git
-cd ollama-terminal
-
-pip install requests
-
-# Pull at least one model
 ollama pull llama3
-
-# Run
-python ollama_terminal.py
 ```
 
 ---
 
-## 🧑‍💻 Usage
+## ▶ Usage
 
-### Interactive Mode (Recommended)
+Interactive menu:
 
 ```bash
 python ollama_terminal.py
 ```
 
----
-
-### Direct Task Mode
+Run a task directly:
 
 ```bash
 python ollama_terminal.py "find all .log files older than 7 days and delete them"
 ```
 
-Specify model manually:
+Choose model manually:
 
 ```bash
 python ollama_terminal.py -m mistral "check for flatpak updates"
 ```
 
----
-
-### System Check
+System check:
 
 ```bash
 python ollama_terminal.py --check
@@ -218,50 +174,9 @@ python ollama_terminal.py --check
 
 ---
 
-## 🧠 How It Works Internally
+## ⚙ Configuration
 
-1. You describe a task.
-2. System context (user, OS, shell, home dir) is injected.
-3. Model is forced to reply in strict JSON:
-   ```json
-   {
-     "action": "run",
-     "command": "...",
-     "reason": "..."
-   }
-   ```
-4. Command executes with live streaming.
-5. Output + exit code sent back to model.
-6. Model decides next action:
-   - run another command
-   - ask a question
-   - fix an error
-   - declare done
-7. Loop continues until:
-   ```json
-   {
-     "action": "done",
-     "summary": "..."
-   }
-   ```
-
----
-
-## 🧪 Example Tasks
-
-```
-check for system updates
-create a git repo in ~/projects/myapp and make an initial commit
-find all .tmp files in /var and delete them
-install the httpie cli tool
-show disk usage sorted by size
-back up my Documents folder to ~/backups with today's date
-set up a python venv in the current folder and install flask
-```
-
----
-
-## ⚙ Configuration (Inside `ollama_terminal.py`)
+Inside `ollama_terminal.py`:
 
 ```python
 OLLAMA_BASE      = "http://localhost:11434"
@@ -270,62 +185,45 @@ MAX_JSON_RETRIES = 5
 MAX_HISTORY_MSGS = 16
 ```
 
-Adjust these if needed.
+You can adjust these if needed.
+
+---
+
+## 🧠 How It Works (Simple)
+
+1. You describe a task.
+2. The model replies in strict JSON:
+   ```json
+   {"action":"run","command":"...","reason":"..."}
+   ```
+3. The script runs the command.
+4. Output is sent back to the model.
+5. The loop continues until:
+   ```json
+   {"action":"done","summary":"..."}
+   ```
+
+The model must verify success before finishing.
 
 ---
 
 ## 🧩 Recommended Models
 
-| Model | Best For |
-|-------|----------|
-| llama3:latest | Reliable all-rounder |
-| llama3.1 | Strong multi-step reasoning |
-| mistral | Fast and stable |
-| qwen2.5-coder | Dev-heavy tasks |
-| deepseek-r1 | Deep reasoning |
-| gemma2:2b | Lightweight tasks |
+- `llama3` — reliable all-rounder  
+- `llama3.1` — strong reasoning  
+- `mistral` — fast and stable  
+- `qwen2.5-coder` — coding tasks  
+- `deepseek-r1` — thorough reasoning  
 
-⚠ Models under ~1B parameters often struggle with strict JSON formatting.
+⚠ Very small models (<1B params) may struggle with strict JSON formatting.
 
 ---
 
-## 🛠 Troubleshooting
-
-### Cannot connect to Ollama
-Run:
-
-```bash
-ollama serve
-```
-
-Or use menu option 7.
-
----
-
-### Model produces bad JSON
-Use a larger model (≥ 3B parameters recommended).
-
----
-
-### Command timeout
-Default timeout is 120 seconds per command.
-Modify inside `run_cmd()` if needed.
-
----
-
-### Task loops forever
-- Rephrase task more specifically.
-- Add Custom Instructions.
-- Increase `MAX_ITERATIONS`.
-
----
-
-## 🔐 Security Note
+## 🛡 Security Note
 
 This tool executes **real shell commands**.
 
-Only run tasks you understand.
-
+Be specific with tasks.  
 Avoid vague destructive instructions like:
 
 ```
@@ -334,7 +232,7 @@ optimize everything
 delete unused stuff
 ```
 
-Be specific.
+Always review what you're asking it to do.
 
 ---
 
