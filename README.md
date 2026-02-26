@@ -9,6 +9,9 @@ Describe a goal in plain English — the agent plans the steps, executes real sh
 ✅ No cloud  
 ✅ No data leaves your machine  
 
+
+(If you don't trust this .py file... you can always just upload to a AI and will tell you if its safe or not)
+
 ---
 
 ## 🚀 What It Does
