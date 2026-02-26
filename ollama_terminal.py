@@ -3,7 +3,41 @@
 Ollama Terminal — autonomous shell agent
 """
 
-import subprocess, json, requests, sys, os, time, argparse, re, shutil, threading
+import subprocess, json, sys, os, time, argparse, re, shutil, threading
+import urllib.request, urllib.parse, html
+
+# ── Bootstrap: only stdlib needed to start. Everything else installed via check ──
+def _ensure(pkg, import_as=None):
+    """Silently try importing; return True if available."""
+    try:
+        __import__(import_as or pkg); return True
+    except ImportError:
+        return False
+
+# Lazy-load optional deps — available after system_check installs them
+requests          = None   # filled by _load_requests()
+DDGS              = None   # filled by _load_ddgs()
+WEB_AVAILABLE     = False
+
+def _load_requests():
+    global requests
+    if requests is not None: return True
+    try:
+        import requests as _r; requests = _r; return True
+    except ImportError:
+        return False
+
+def _load_ddgs():
+    global DDGS, WEB_AVAILABLE
+    if DDGS is not None: return True
+    try:
+        from duckduckgo_search import DDGS as _D; DDGS = _D; WEB_AVAILABLE = True; return True
+    except ImportError:
+        return False
+
+# Try loading at startup — works fine if already installed
+_load_requests()
+_load_ddgs()
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 R="\033[0m"; B="\033[1m"; DIM="\033[2m"
@@ -33,9 +67,17 @@ BASE_SYSTEM_PROMPT = """\
 You are an autonomous shell agent on Linux. Complete tasks by running shell commands.
 
 REPLY FORMAT — always output exactly one JSON object, nothing else:
-  Run a command : {"action": "run",  "command": "...", "reason": "..."}
-  Task is done  : {"action": "done", "summary": "..."}
-  Ask the user  : {"action": "ask",  "question": "..."}
+  Run a command : {"action": "run",    "command": "...", "reason": "..."}
+  Search web    : {"action": "search", "query": "...",   "reason": "..."}
+  Fetch a URL   : {"action": "fetch",  "url": "...",     "reason": "..."}
+  Task is done  : {"action": "done",   "summary": "..."}
+  Ask the user  : {"action": "ask",    "question": "..."}
+
+WEB SEARCH RULES:
+- Use {"action":"search"} to look up how to install software, fix errors, find latest versions.
+- Use {"action":"fetch"} to read a specific page (docs, release notes, etc.).
+- Search BEFORE guessing package names or commands you are unsure about.
+- After getting search results, use the info to run the correct command.
 
 RULES:
 - Output ONLY the JSON object. Zero prose, zero markdown, zero backticks.
@@ -62,6 +104,40 @@ FINISHING:
 
 RETRY_PROMPT = ('BAD JSON. Reply with ONLY a raw JSON object. No text before or after. '
                 'Example: {"action":"run","command":"ls /tmp","reason":"explore"}')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Web search + fetch (no API key — uses DuckDuckGo HTML scrape)
+# ─────────────────────────────────────────────────────────────────────────────
+def web_search(query, max_results=5):
+    """Search DuckDuckGo, return list of {title, url, snippet}."""
+    _load_ddgs()
+    if not WEB_AVAILABLE or DDGS is None:
+        return [{"title":"Web search unavailable",
+                 "url":"","snippet":"Run system check (option 5) to install duckduckgo-search"}]
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return [{"title": r.get("title",""), "url": r.get("href",""),
+                 "snippet": r.get("body","")} for r in results]
+    except Exception as e:
+        return [{"title":"Search error","url":"","snippet":str(e)}]
+
+def web_fetch(url, max_chars=3000):
+    """Fetch a URL and return cleaned plain text."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent":
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        # Strip tags
+        text = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL|re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>',  '', text, flags=re.DOTALL|re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = html.unescape(text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:max_chars]
+    except Exception as e:
+        return f"Fetch error: {e}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Spinner — stops cleanly before any input() call
@@ -129,10 +205,12 @@ def pick(title, options, allow_back=True):
 # Ollama service
 # ─────────────────────────────────────────────────────────────────────────────
 def _ollama_running():
+    if not _load_requests(): return False
     try: return requests.get(f"{OLLAMA_BASE}/api/tags",timeout=2).status_code==200
     except: return False
 
 def _get_models():
+    if not _load_requests(): return []
     try:
         r=requests.get(f"{OLLAMA_BASE}/api/tags",timeout=2)
         if r.status_code==200: return [m["name"] for m in r.json().get("models",[])]
@@ -219,33 +297,98 @@ def saved_tasks_menu():
     input(f"  {DIM}Press Enter…{R}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# System check
+# System check — diagnoses AND auto-installs missing Python deps
 # ─────────────────────────────────────────────────────────────────────────────
-def system_check():
-    banner(); print(f"  {B}{WH}System Check{R}\n"); ok_all=True
-    def row(label,ok,ok_msg,fix_msg):
-        nonlocal ok_all
-        sym=f"{GR}✓{R}" if ok else f"{RD}✗{R}"
-        msg=f"{DIM}{ok_msg}{R}" if ok else f"{RD}{fix_msg}{R}"
-        print(f"  {sym}  {B}{label:<22}{R} {msg}")
-        if not ok: ok_all=False
-    row("Python 3.8+",sys.version_info>=(3,8),f"v{sys.version.split()[0]}","Upgrade Python")
-    try: import requests as _r; row("requests lib",True,"installed","")
-    except ImportError: row("requests lib",False,"","pip install requests")
-    path=shutil.which("ollama") or ""
-    row("ollama binary",bool(path),path or "not found","Install: https://ollama.com/download")
-    row("Ollama service",_ollama_running(),f"OK at {OLLAMA_BASE}","Run: ollama serve")
-    models=_get_models(); print()
+def _pip_install(pkg):
+    """Install a pip package into user site. Returns True on success."""
+    print(f"  {YL}  Installing {pkg}…{R}", flush=True)
+    res = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--user", pkg],
+        capture_output=True, text=True
+    )
+    if res.returncode == 0:
+        print(f"  {GR}  ✓ {pkg} installed{R}")
+        return True
+    else:
+        print(f"  {RD}  ✗ Failed: {res.stderr.strip()[-200:]}{R}")
+        return False
+
+def system_check(auto_install=True):
+    banner()
+    print(f"  {B}{WH}System Check{R}\n")
+    issues = []
+    installed_something = False
+
+    def row(label, ok, ok_msg, fix_msg):
+        sym = f"{GR}✓{R}" if ok else f"{RD}✗{R}"
+        msg = f"{DIM}{ok_msg}{R}" if ok else f"{RD}{fix_msg}{R}"
+        print(f"  {sym}  {B}{label:<26}{R} {msg}")
+        if not ok: issues.append(label)
+
+    # ── Python version ────────────────────────────────────────────────────────
+    py_ok = sys.version_info >= (3, 8)
+    row("Python 3.8+", py_ok, f"v{sys.version.split()[0]}", "Upgrade Python from python.org")
+
+    # ── requests ─────────────────────────────────────────────────────────────
+    req_ok = _ensure("requests")
+    if not req_ok and auto_install:
+        req_ok = _pip_install("requests")
+        if req_ok: _load_requests(); installed_something = True
+    row("requests", req_ok, "installed", "pip install requests")
+
+    # ── duckduckgo-search ─────────────────────────────────────────────────────
+    ddg_ok = _ensure("duckduckgo_search")
+    if not ddg_ok and auto_install:
+        print(f"\n  {YL}Web search not installed — installing now…{R}")
+        ddg_ok = _pip_install("duckduckgo-search")
+        if ddg_ok: _load_ddgs(); installed_something = True
+    row("duckduckgo-search", ddg_ok,
+        "installed — web search enabled",
+        "will be auto-installed on next check")
+
+    # ── ollama binary ─────────────────────────────────────────────────────────
+    path = shutil.which("ollama") or ""
+    row("ollama binary", bool(path), path, "Install: https://ollama.com/download")
+
+    # ── ollama service ────────────────────────────────────────────────────────
+    svc_ok = _ollama_running()
+    if not svc_ok and shutil.which("ollama") and auto_install:
+        print(f"\n  {YL}  Starting Ollama…{R}", end=" ", flush=True)
+        subprocess.Popen(["ollama","serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for _ in range(20):
+            time.sleep(0.5)
+            if _ollama_running(): svc_ok = True; break
+        print(f"{GR}started{R}" if svc_ok else f"{RD}failed{R}")
+    row("Ollama service", svc_ok, f"running at {OLLAMA_BASE}", "Run: ollama serve")
+
+    # ── models ────────────────────────────────────────────────────────────────
+    models = _get_models(); print()
     if models:
         print(f"  {GR}✓{R}  {B}Installed models{R}  {DIM}({len(models)}){R}")
         for m in models: print(f"       {DIM}• {m}{R}")
     else:
-        print(f"  {YL}!{R}  {B}No models{R}  {DIM}Run: ollama pull llama3{R}"); ok_all=False
-    cfg=load_config(); ci=cfg.get("custom_instructions",""); print()
-    if ci: print(f"  {GR}✓{R}  {B}Custom instructions{R}  {DIM}set ({len(ci)} chars){R}")
-    else:  print(f"  {DIM}ℹ  No custom instructions (menu option 6){R}")
+        print(f"  {YL}!{R}  {B}No models installed{R}")
+        print(f"  {DIM}  Use menu option 4 to pull a model (e.g. llama3){R}")
+        issues.append("models")
+
+    # ── custom instructions status ────────────────────────────────────────────
+    cfg = load_config(); ci = cfg.get("custom_instructions",""); print()
+    if ci: print(f"  {GR}✓{R}  {B}Custom instructions{R}  {DIM}({len(ci)} chars){R}")
+    else:  print(f"  {DIM}ℹ  No custom instructions set (option 6){R}")
+
+    # ── summary ───────────────────────────────────────────────────────────────
     print()
-    print(f"  {GR}{B}All checks passed ✓{R}\n" if ok_all else f"  {YL}Some issues — see above.{R}\n")
+    if installed_something:
+        print(f"  {GR}Installed missing packages — restart the script to activate them fully.{R}\n")
+    if not issues:
+        print(f"  {GR}{B}All checks passed ✓{R}\n")
+    else:
+        remaining = [i for i in issues if i not in ("duckduckgo-search","requests") or not installed_something]
+        if remaining:
+            print(f"  {YL}Issues remaining: {', '.join(remaining)}{R}\n")
+        else:
+            print(f"  {GR}All issues resolved ✓{R}\n")
+
     input(f"  {DIM}Press Enter…{R}")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -400,6 +543,8 @@ def build_system_prompt():
     if ci:
         extras += f"\n\nCUSTOM INSTRUCTIONS:\n{ci}"
 
+    web_note = "available (duckduckgo-search installed)" if WEB_AVAILABLE else "NOT available — run: pip install duckduckgo-search"
+    env_block += f"\n  web search: {web_note}"
     return BASE_SYSTEM_PROMPT + f"\n\n{env_block}" + extras
 
 def run_agent(task, model):
@@ -485,6 +630,64 @@ def run_agent(task, model):
             messages += [{"role":"assistant","content":raw},
                          {"role":"user","content":
                           f"{ans}\n\nContinue task now. Do NOT ask more questions. JSON only."}]
+
+        # ── SEARCH ───────────────────────────────────────────────────────────
+        elif action == "search":
+            query  = parsed.get("query","").strip()
+            reason = parsed.get("reason","")
+            hr(w=62,ch="╌")
+            print(f"  {MG}Step {step}{R}  {CY}🔍 Searching:{R} {query}")
+            if not query:
+                messages += [{"role":"assistant","content":raw},
+                             {"role":"user","content":"Empty search query. Try again."}]
+                continue
+            spin = Spinner(f"Searching…").start()
+            results = web_search(query)
+            spin.stop()
+            if results:
+                lines = []
+                for i,r in enumerate(results,1):
+                    lines.append(f"[{i}] {r['title']}")
+                    lines.append(f"    URL: {r['url']}")
+                    lines.append(f"    {r['snippet']}")
+                    lines.append("")
+                result_text = "\n".join(lines)
+                print(f"  {GR}│{R} {len(results)} results found")
+            else:
+                result_text = "No results found."
+                print(f"  {YL}│ No results{R}")
+            print(f"  {GR}└─ ✓{R}\n")
+            feedback = (
+                f"Search query: {query}\n"
+                f"Results:\n{result_text}\n\n"
+                "Use these results to decide your next action. "
+                "You can fetch a URL for more detail, or run a command. JSON only."
+            )
+            messages += [{"role":"assistant","content":raw},
+                         {"role":"user","content":feedback}]
+
+        # ── FETCH ─────────────────────────────────────────────────────────────
+        elif action == "fetch":
+            url    = parsed.get("url","").strip()
+            reason = parsed.get("reason","")
+            hr(w=62,ch="╌")
+            print(f"  {MG}Step {step}{R}  {CY}🌐 Fetching:{R} {url}")
+            if not url:
+                messages += [{"role":"assistant","content":raw},
+                             {"role":"user","content":"Empty URL. Try again."}]
+                continue
+            spin = Spinner("Fetching page…").start()
+            page_text = web_fetch(url)
+            spin.stop()
+            print(f"  {GR}│{R} {len(page_text)} chars read")
+            print(f"  {GR}└─ ✓{R}\n")
+            feedback = (
+                f"Fetched URL: {url}\n"
+                f"Page content (truncated):\n{page_text}\n\n"
+                "Use this information to proceed with the task. JSON only."
+            )
+            messages += [{"role":"assistant","content":raw},
+                         {"role":"user","content":feedback}]
 
         # ── RUN ──────────────────────────────────────────────────────────────
         else:
