@@ -9,7 +9,8 @@ Describe a task in plain English — it plans the steps, runs real shell command
 ✅ No cloud  
 ✅ No data leaves your machine  
 
-(If you don't trust this .py file... you can always just upload to a AI and will tell you if its safe or not)
+<sub>If you don’t trust this `.py` file, you can upload it to any AI or review tool and verify that it’s safe.</sub>
+
 ---
 
 ## 🖥 Full Demo
@@ -94,13 +95,13 @@ Save as a saved task? [y/N]: y
 
 ## 🚀 What It Can Do
 
-- Create projects
-- Install packages
-- Manage files
-- Debug errors
-- Run system maintenance
-- Use web search when necessary
-- Break large tasks into safe, small steps
+- Create projects  
+- Install packages  
+- Manage files  
+- Debug errors  
+- Run system maintenance  
+- Use web search when needed  
+- Break large tasks into safe, small steps  
 
 Everything runs in your real shell.
 
@@ -108,29 +109,29 @@ Everything runs in your real shell.
 
 ## ✨ Core Features
 
-- Autonomous execution loop
-- Live streaming command output
-- Self-correcting on errors
-- Strict JSON action format
-- Auto-detects:
-  - Username
-  - Home directory
-  - OS
-  - Shell
-  - Current working directory
-  - Available package managers
-- Saved tasks
-- Custom persistent instructions
-- Auto-starts Ollama if needed
-- Works with most Ollama models
+- Autonomous execution loop  
+- Live streaming command output  
+- Self-correcting error handling  
+- Strict JSON action format  
+- Automatically detects:
+  - Username  
+  - Home directory  
+  - Operating system  
+  - Shell  
+  - Current working directory  
+  - Available package managers  
+- Saved tasks  
+- Custom persistent instructions  
+- Auto-starts Ollama if needed  
+- Works with most Ollama models  
 
 ---
 
 ## 📦 Requirements
 
-- Python 3.8+
-- Ollama installed
-- `requests` library
+- Python 3.8+  
+- Ollama installed  
+- `requests` library  
 
 Install dependency:
 
@@ -160,7 +161,7 @@ Run a task directly:
 python ollama_terminal.py "find all .log files older than 7 days and delete them"
 ```
 
-Choose model manually:
+Choose a model manually:
 
 ```bash
 python ollama_terminal.py -m mistral "check for flatpak updates"
@@ -191,13 +192,13 @@ You can adjust these if needed.
 
 ## 🧠 How It Works (Simple)
 
-1. You describe a task.
+1. You describe a task.  
 2. The model replies in strict JSON:
    ```json
    {"action":"run","command":"...","reason":"..."}
    ```
-3. The script runs the command.
-4. Output is sent back to the model.
+3. The script runs the command.  
+4. The output is sent back to the model.  
 5. The loop continues until:
    ```json
    {"action":"done","summary":"..."}
@@ -215,7 +216,7 @@ The model must verify success before finishing.
 - `qwen2.5-coder` — coding tasks  
 - `deepseek-r1` — thorough reasoning  
 
-⚠ Very small models (<1B params) may struggle with strict JSON formatting.
+⚠ Very small models (<1B parameters) may struggle with strict JSON formatting.
 
 ---
 
@@ -224,7 +225,7 @@ The model must verify success before finishing.
 This tool executes **real shell commands**.
 
 Be specific with tasks.  
-Avoid vague destructive instructions like:
+Avoid vague destructive instructions such as:
 
 ```
 clean my system
@@ -232,7 +233,7 @@ optimize everything
 delete unused stuff
 ```
 
-Always review what you're asking it to do.
+Always review what you are asking it to do.
 
 ---
 
