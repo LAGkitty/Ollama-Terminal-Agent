@@ -23,15 +23,36 @@ def _load_requests():
     global requests
     if requests is not None: return True
     try:
+        import importlib, site
+        importlib.invalidate_caches()
+        # Ensure --user site-packages is on path
+        try:
+            for p in [site.getusersitepackages()] if isinstance(site.getusersitepackages(), str) else site.getusersitepackages():
+                if p not in sys.path: sys.path.insert(0, p)
+        except Exception: pass
         import requests as _r; requests = _r; return True
     except ImportError:
         return False
 
 def _load_ddgs():
     global DDGS, WEB_AVAILABLE
-    if DDGS is not None: return True
+    if WEB_AVAILABLE and DDGS is not None: return True
     try:
-        from duckduckgo_search import DDGS as _D; DDGS = _D; WEB_AVAILABLE = True; return True
+        import importlib, site
+        importlib.invalidate_caches()
+        # Ensure --user site-packages is on path (covers pyenv, venv, --user installs)
+        try:
+            usp = site.getusersitepackages()
+            paths = [usp] if isinstance(usp, str) else usp
+            for p in paths:
+                if p and p not in sys.path: sys.path.insert(0, p)
+        except Exception: pass
+        # Remove stale cache entries if any (old and new names)
+        for k in list(sys.modules.keys()):
+            if "duckduckgo" in k.lower() or "ddgs" in k.lower():
+                del sys.modules[k]
+        from ddgs import DDGS as _D
+        DDGS = _D; WEB_AVAILABLE = True; return True
     except ImportError:
         return False
 
@@ -64,42 +85,44 @@ def save_config(cfg):
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 BASE_SYSTEM_PROMPT = """\
-You are an autonomous shell agent on Linux. Complete tasks by running shell commands.
+You are an autonomous shell agent on Linux. You have access to web search and shell commands.
 
 REPLY FORMAT — always output exactly one JSON object, nothing else:
-  Run a command : {"action": "run",    "command": "...", "reason": "..."}
-  Search web    : {"action": "search", "query": "...",   "reason": "..."}
-  Fetch a URL   : {"action": "fetch",  "url": "...",     "reason": "..."}
-  Task is done  : {"action": "done",   "summary": "..."}
-  Ask the user  : {"action": "ask",    "question": "..."}
+  Search web  : {"action": "search", "query": "...",   "reason": "..."}
+  Fetch a URL : {"action": "fetch",  "url": "...",     "reason": "..."}
+  Run command : {"action": "run",    "command": "...", "reason": "..."}
+  Task done   : {"action": "done",   "summary": "..."}
+  Ask user    : {"action": "ask",    "question": "..."}
 
-WEB SEARCH RULES:
-- Use {"action":"search"} to look up how to install software, fix errors, find latest versions.
-- Use {"action":"fetch"} to read a specific page (docs, release notes, etc.).
-- Search BEFORE guessing package names or commands you are unsure about.
-- After getting search results, use the info to run the correct command.
+══ COMMAND FIRST ══
+Use your own knowledge of common packages and commands first. Try them directly.
+Web search is OPTIONAL — only use it if you truly don't know the command or need verification.
 
-RULES:
-- Output ONLY the JSON object. Zero prose, zero markdown, zero backticks.
-- One command per reply. Keep commands simple.
-- Move files with bash for-loops, never xargs -I with -n:
-    for f in /path/*.ext; do mv "$f" /dest/; done
-- Write files with: printf 'text' > file.txt
-- Use full absolute paths always.
-- Before acting on a directory, run ls to see what's there.
+══ DOWNLOAD RULES ══
+- After curl/wget always run: ls -lh <filename>
+- File under 1KB = download FAILED (got redirect/error page), not success
+- If download looks wrong: search for the correct direct asset URL
+- GitHub: look for the actual release asset URL, not the page URL
+- Use curl -L (follow redirects) for GitHub and most downloads
 
-ON FAILURE (exit code != 0):
-- Never repeat the failed command.
-- Try a simpler alternative. Break complex steps into smaller ones.
+══ COMMAND RULES ══
+- Output ONLY the JSON object. No prose, no markdown, no backticks.
+- One command per step. Keep it simple.
+- Full absolute paths always.
+- For file moves: for f in /path/*.ext; do mv "$f" /dest/; done
+- If a package manager command fails (e.g., pamac not found), try alternatives: pacman, apt, dnf, or uninstall via direct paths.
+- Always try at least 2 different approaches before searching.
+- Use non-interactive flags to avoid prompts: pacman use --noconfirm, apt use -y, dnf use -y
+- For pacman: "pacman -R <pkg>" → use "pacman -Rn --noconfirm <pkg>" instead (no interactive prompt)
 
-ASKING QUESTIONS:
-- Only use {"action":"ask"} when you genuinely cannot proceed without more info.
-- Do NOT ask for confirmation. Just do the task.
-- Do NOT ask "do you want me to..." — assume yes and proceed.
+══ ON FAILURE ══
+- Never repeat the same failed command.
+- Try a different approach or search if stuck.
+- Break complex steps into smaller ones.
 
-FINISHING:
-- Verify success before marking done (ls, cat, etc.).
-- Use {"action":"done"} only when fully confirmed complete.\
+══ FINISHING ══
+- Verify with ls -lh or which or cat before marking done.
+- {"action":"done"} only when fully confirmed.\
 """
 
 RETRY_PROMPT = ('BAD JSON. Reply with ONLY a raw JSON object. No text before or after. '
@@ -108,19 +131,31 @@ RETRY_PROMPT = ('BAD JSON. Reply with ONLY a raw JSON object. No text before or 
 # ─────────────────────────────────────────────────────────────────────────────
 # Web search + fetch (no API key — uses DuckDuckGo HTML scrape)
 # ─────────────────────────────────────────────────────────────────────────────
-def web_search(query, max_results=5):
-    """Search DuckDuckGo, return list of {title, url, snippet}."""
+def web_search(query, max_results=6):
+    """Search DuckDuckGo with retry. Falls back to a note if unavailable."""
+    import warnings
     _load_ddgs()
     if not WEB_AVAILABLE or DDGS is None:
-        return [{"title":"Web search unavailable",
-                 "url":"","snippet":"Run system check (option 5) to install duckduckgo-search"}]
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results))
-        return [{"title": r.get("title",""), "url": r.get("href",""),
-                 "snippet": r.get("body","")} for r in results]
-    except Exception as e:
-        return [{"title":"Search error","url":"","snippet":str(e)}]
+        return None   # caller handles this
+
+    last_err = ""
+    for attempt in range(3):
+        try:
+            if attempt > 0:
+                time.sleep(2)
+            # Suppress deprecation warnings from ddgs package
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, max_results=max_results))
+            if results:
+                return [{"title": r.get("title",""), "url": r.get("href",""),
+                         "snippet": r.get("body","")} for r in results]
+        except Exception as e:
+            last_err = str(e)
+
+    return [{"title": f"Search failed after 3 attempts: {last_err}",
+             "url": "", "snippet": "Try fetching the project homepage directly."}]
 
 def web_fetch(url, max_chars=3000):
     """Fetch a URL and return cleaned plain text."""
@@ -336,13 +371,13 @@ def system_check(auto_install=True):
         if req_ok: _load_requests(); installed_something = True
     row("requests", req_ok, "installed", "pip install requests")
 
-    # ── duckduckgo-search ─────────────────────────────────────────────────────
-    ddg_ok = _ensure("duckduckgo_search")
+    # ── ddgs (web search) ─────────────────────────────────────────────────────
+    ddg_ok = _ensure("ddgs")
     if not ddg_ok and auto_install:
         print(f"\n  {YL}Web search not installed — installing now…{R}")
-        ddg_ok = _pip_install("duckduckgo-search")
+        ddg_ok = _pip_install("ddgs")
         if ddg_ok: _load_ddgs(); installed_something = True
-    row("duckduckgo-search", ddg_ok,
+    row("ddgs", ddg_ok,
         "installed — web search enabled",
         "will be auto-installed on next check")
 
@@ -444,7 +479,13 @@ def call_model(messages, model, url, mode):
                       "options":{"temperature":0.05,"num_predict":400}},
                 timeout=180)
             r.raise_for_status()
-            return r.json()["message"]["content"].strip()
+            try:
+                data = r.json()
+                if not data or "message" not in data:
+                    raise ValueError(f"Invalid response structure: {data}")
+                return data["message"]["content"].strip()
+            except (json.JSONDecodeError, ValueError) as je:
+                raise RuntimeError(f"JSON parse error: {je} -- Response: {r.text[:200]}")
         else:
             parts=[]
             for m in msgs:
@@ -456,11 +497,19 @@ def call_model(messages, model, url, mode):
                       "options":{"temperature":0.05,"num_predict":400}},
                 timeout=180)
             r.raise_for_status()
-            return r.json()["response"].strip()
+            try:
+                data = r.json()
+                if not data or "response" not in data:
+                    raise ValueError(f"Invalid response structure: {data}")
+                return data["response"].strip()
+            except (json.JSONDecodeError, ValueError) as je:
+                raise RuntimeError(f"JSON parse error: {je} -- Response: {r.text[:200]}")
     except requests.exceptions.HTTPError:
-        print(f"\n{RD}HTTP {r.status_code}: {r.text[:200]}{R}"); sys.exit(1)
+        # Raise instead of exiting so the caller can retry or handle it
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        print(f"\n{RD}API error: {e}{R}"); sys.exit(1)
+        # Raise generic runtime error for the caller to handle
+        raise RuntimeError(f"API error: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JSON parser
@@ -521,30 +570,73 @@ def run_cmd(cmd, timeout=120):
 # ─────────────────────────────────────────────────────────────────────────────
 def build_system_prompt():
     import getpass, platform, socket
-    username  = getpass.getuser()
-    home      = os.path.expanduser("~")
-    hostname  = socket.gethostname()
-    os_info   = platform.platform()
-    shell     = os.environ.get("SHELL", "/bin/bash")
+    username = getpass.getuser()
+    home     = os.path.expanduser("~")
+    hostname = socket.gethostname()
+    shell    = os.environ.get("SHELL", "/bin/bash")
+
+    # ── Distro detection ──────────────────────────────────────────────────────
+    distro = "unknown"
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    distro = line.split("=",1)[1].strip().strip('"')
+                    break
+    except Exception:
+        distro = platform.platform()
+
+    # ── Package manager detection ─────────────────────────────────────────────
+    pkg_managers = []
+    pm_hints = {}
+    checks = [
+        ("pacman",  "pacman",  "pacman -S <pkg>"),
+        ("yay",     "yay",     "yay -S <pkg>"),
+        ("paru",    "paru",    "paru -S <pkg>"),
+        ("apt",     "apt",     "apt install <pkg>"),
+        ("apt-get", "apt-get", "apt-get install <pkg>"),
+        ("dnf",     "dnf",     "dnf install <pkg>"),
+        ("zypper",  "zypper",  "zypper install <pkg>"),
+        ("emerge",  "emerge",  "emerge <pkg>"),
+        ("flatpak", "flatpak", "flatpak install flathub <pkg>"),
+        ("snap",    "snap",    "snap install <pkg>"),
+        ("brew",    "brew",    "brew install <pkg>"),
+        ("pip3",    "pip3",    "pip3 install <pkg>"),
+    ]
+    for name, binary, cmd in checks:
+        if shutil.which(binary):
+            pkg_managers.append(name)
+            pm_hints[name] = cmd
+
+    pm_str = ", ".join(pkg_managers) if pkg_managers else "none detected"
+    pm_detail = "\n".join(f"    {n}: {c}" for n,c in pm_hints.items())
+
+    # ── Desktop environment ───────────────────────────────────────────────────
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP") or os.environ.get("DESKTOP_SESSION","unknown")
+
+    # ── Architecture ─────────────────────────────────────────────────────────
+    arch = platform.machine()
+
+    web_note = "YES — web search active" if WEB_AVAILABLE else "NO — will auto-install on first search"
 
     env_block = (
-        f"SYSTEM ENVIRONMENT (use these exact paths — never guess):\n"
-        f"  username : {username}\n"
-        f"  home dir : {home}\n"
-        f"  hostname : {hostname}\n"
-        f"  OS       : {os_info}\n"
-        f"  shell    : {shell}\n"
-        f"  cwd      : {os.getcwd()}"
+        f"SYSTEM ENVIRONMENT — use these exact values, never guess:\n"
+        f"  username    : {username}\n"
+        f"  home dir    : {home}\n"
+        f"  hostname    : {hostname}\n"
+        f"  distro      : {distro}\n"
+        f"  arch        : {arch}\n"
+        f"  desktop     : {desktop}\n"
+        f"  shell       : {shell}\n"
+        f"  cwd         : {os.getcwd()}\n"
+        f"  web search  : {web_note}\n"
+        f"  pkg managers: {pm_str}\n"
+        f"  install cmds:\n{pm_detail}"
     )
 
     cfg = load_config()
     ci  = cfg.get("custom_instructions","").strip()
-    extras = ""
-    if ci:
-        extras += f"\n\nCUSTOM INSTRUCTIONS:\n{ci}"
-
-    web_note = "available (duckduckgo-search installed)" if WEB_AVAILABLE else "NOT available — run: pip install duckduckgo-search"
-    env_block += f"\n  web search: {web_note}"
+    extras = f"\n\nCUSTOM INSTRUCTIONS:\n{ci}" if ci else ""
     return BASE_SYSTEM_PROMPT + f"\n\n{env_block}" + extras
 
 def run_agent(task, model):
@@ -557,13 +649,26 @@ def run_agent(task, model):
     print(f"  {B}Task: {R} {WH}{task}{R}")
     hr(); print()
 
+    # Detect if task likely needs a web search first
+    search_kw = ["download","install","get","update","upgrade","find","latest",
+                 "setup","build","compile","fetch","clone","pull","deploy","how"]
+    likely_needs_search = any(w in task.lower() for w in search_kw)
+
+    if likely_needs_search:
+        first_msg = (
+            f"Task: {task}\n\n"
+            "If you know the command, run it directly. "
+            "Use web search only if you're unsure about the package name or command. JSON only."
+        )
+    else:
+        first_msg = (
+            f"Task: {task}\n\n"
+            "Proceed with the task using shell commands and your knowledge. JSON only."
+        )
+
     messages=[
         {"role":"system","content":build_system_prompt()},
-        {"role":"user","content":(
-            f"Task: {task}\n\n"
-            "First run ls on any target directory to see what's there. "
-            "Do NOT ask for confirmation — just do the task. JSON only."
-        )}
+        {"role":"user","content":first_msg}
     ]
 
     step=0; consecutive_fails=0; spinner=None
@@ -573,7 +678,21 @@ def run_agent(task, model):
 
         # Start spinner ONLY when model is thinking, stop it before any output/input
         spinner = Spinner(f"Thinking  [step {step}]").start()
-        raw = call_model(messages, model, url, mode)
+        try:
+            raw = call_model(messages, model, url, mode)
+        except Exception as e:
+            # Ensure spinner is stopped before printing and retrying
+            spinner.stop(); spinner = None
+            print(f"  {RD}API call error: {e}{R}")
+            consecutive_fails += 1
+            if consecutive_fails >= 3:
+                print(f"  {RD}Stopping after 3 consecutive API errors.{R}\n")
+                return False
+            # Give model a short hint and retry the loop
+            messages += [{"role":"assistant","content":""},
+                         {"role":"user","content":f"API error: {e}. Retry the last step. JSON only."}]
+            time.sleep(2)
+            continue
         spinner.stop(); spinner = None   # ← stopped before we do anything else
 
         parsed = parse_json(raw)
@@ -598,7 +717,7 @@ def run_agent(task, model):
             # Hard reset — wipe history, re-anchor
             messages = [messages[0], {"role":"user","content":
                 f"Task (resume): {task}\n"
-                "Run ls on the target path first. JSON only."}]
+                "Try a different approach. Use your knowledge first, search only if needed. JSON only."}]
             continue
 
         consecutive_fails = 0
@@ -624,45 +743,100 @@ def run_agent(task, model):
         elif action == "ask":
             # Spinner is already stopped — safe to call input()
             q = parsed.get("question","?")
-            print(f"\n  {YL}❓ Agent asks:{R} {q}")
-            ans = input(f"  {YL}   Your answer:{R} ").strip()
-            print()
-            messages += [{"role":"assistant","content":raw},
-                         {"role":"user","content":
-                          f"{ans}\n\nContinue task now. Do NOT ask more questions. JSON only."}]
+            
+            # For package manager prompts, respond with 'yes' automatically and retry
+            if any(kw in q.lower() for kw in ["remove", "delete", "want to"]):
+                print(f"\n  {DIM}(Package manager confirmation detected — auto-responding 'yes'){R}")
+                messages += [{"role":"assistant","content":raw},
+                             {"role":"user","content":
+                              "User confirmed 'yes'. Now retry the previous command with --noconfirm or -y flag to avoid interactive prompts. JSON only."}]
+            else:
+                # For other questions, ask the user
+                print(f"\n  {YL}❓ Agent asks:{R} {q}")
+                ans = input(f"  {YL}   Your answer:{R} ").strip()
+                print()
+                messages += [{"role":"assistant","content":raw},
+                             {"role":"user","content":
+                              f"{ans}\n\nContinue task now. Do NOT ask more questions. JSON only."}]
 
         # ── SEARCH ───────────────────────────────────────────────────────────
         elif action == "search":
             query  = parsed.get("query","").strip()
             reason = parsed.get("reason","")
             hr(w=62,ch="╌")
-            print(f"  {MG}Step {step}{R}  {CY}🔍 Searching:{R} {query}")
+            print(f"  {MG}Step {step}{R}  {CY}🔍 Searching:{R} {DIM}{query}{R}")
             if not query:
                 messages += [{"role":"assistant","content":raw},
-                             {"role":"user","content":"Empty search query. Try again."}]
+                             {"role":"user","content":"Empty search query. Provide a search query."}]
                 continue
-            spin = Spinner(f"Searching…").start()
+
+            # Always attempt fresh load in case it was just pip-installed
+            _load_ddgs()
+            if not WEB_AVAILABLE:
+                print(f"  {YL}│ ddgs not found — trying to install…{R}", flush=True)
+                r = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--user", "ddgs"],
+                    capture_output=True, text=True
+                )
+                if r.returncode == 0:
+                    # After successful install, aggressively reload sys.path and module cache
+                    import importlib, site
+                    importlib.invalidate_caches()
+                    # Clear all duckduckgo/ddgs modules from sys.modules
+                    for k in list(sys.modules.keys()):
+                        if 'duckduckgo' in k.lower() or 'ddgs' in k.lower():
+                            del sys.modules[k]
+                    # Ensure user site-packages is at front of sys.path
+                    try:
+                        usp = site.getusersitepackages()
+                        paths = [usp] if isinstance(usp, str) else usp
+                        for p in paths:
+                            if p and p not in sys.path: sys.path.insert(0, p)
+                    except Exception: pass
+                    _load_ddgs()   # retry import after install with clean cache
+                if not WEB_AVAILABLE:
+                    print(f"  {RD}│ Could not load web search. Run system check (option 5).{R}")
+                    print(f"  {YL}└─ skipped{R}\n")
+                    feedback = (
+                        "Web search is unavailable. Could not install ddgs automatically. "
+                        "Ask the user to run system check from the menu. "
+                        "Try to complete the task using your own knowledge. JSON only."
+                    )
+                    messages += [{"role":"assistant","content":raw},
+                                 {"role":"user","content":feedback}]
+                    continue
+                else:
+                    print(f"  {GR}│ Installed! Web search now active.{R}")
+
+            spin = Spinner("Searching…").start()
             results = web_search(query)
             spin.stop()
-            if results:
+
+            if results and results[0]["url"]:   # real results
                 lines = []
                 for i,r in enumerate(results,1):
+                    if not r["url"]: continue
                     lines.append(f"[{i}] {r['title']}")
                     lines.append(f"    URL: {r['url']}")
-                    lines.append(f"    {r['snippet']}")
+                    if r["snippet"]: lines.append(f"    {r['snippet'][:300]}")
                     lines.append("")
                 result_text = "\n".join(lines)
-                print(f"  {GR}│{R} {len(results)} results found")
+                print(f"  {GR}│{R} {GR}{len(results)} results{R}")
+                print(f"  {GR}└─ ✓{R}\n")
+                feedback = (
+                    f"Search: {query}\n"
+                    f"Results:\n{result_text}\n\n"
+                    "Pick the most relevant result. Fetch its URL for more detail if needed, "
+                    "then use the real URL/command from the page. JSON only."
+                )
             else:
-                result_text = "No results found."
-                print(f"  {YL}│ No results{R}")
-            print(f"  {GR}└─ ✓{R}\n")
-            feedback = (
-                f"Search query: {query}\n"
-                f"Results:\n{result_text}\n\n"
-                "Use these results to decide your next action. "
-                "You can fetch a URL for more detail, or run a command. JSON only."
-            )
+                err = results[0]["title"] if results else "No results"
+                print(f"  {YL}│ {err}{R}")
+                print(f"  {YL}└─ no results{R}\n")
+                feedback = (
+                    f"Search for \"{query}\" returned no useful results ({err}). "
+                    "Try a different search query or fetch the project homepage directly. JSON only."
+                )
             messages += [{"role":"assistant","content":raw},
                          {"role":"user","content":feedback}]
 
@@ -671,10 +845,13 @@ def run_agent(task, model):
             url    = parsed.get("url","").strip()
             reason = parsed.get("reason","")
             hr(w=62,ch="╌")
-            print(f"  {MG}Step {step}{R}  {CY}🌐 Fetching:{R} {url}")
-            if not url:
+            print(f"  {MG}Step {step}{R}  {CY}🌐 Fetching:{R} {DIM}{url}{R}")
+            if not url or not url.startswith("http"):
+                print(f"  {RD}│ Invalid URL: {url!r}{R}\n")
                 messages += [{"role":"assistant","content":raw},
-                             {"role":"user","content":"Empty URL. Try again."}]
+                             {"role":"user","content":
+                              f"Invalid URL {url!r}. Provide a real http/https URL to fetch. "
+                              "If you don\'t have one, run a search first. JSON only."}]
                 continue
             spin = Spinner("Fetching page…").start()
             page_text = web_fetch(url)
@@ -710,20 +887,53 @@ def run_agent(task, model):
             stderr = result["stderr"][-800:]  if len(result["stderr"])>800  else result["stderr"]
 
             if ok:
-                feedback=(
-                    f"RESULT: SUCCESS\nCommand: {cmd}\nstdout:\n{stdout}\nstderr:\n{stderr}\n\n"
-                    "Is the full task now complete?\n"
-                    '- Yes: {"action":"done","summary":"..."}\n'
-                    '- No:  next command as JSON. Do NOT ask questions.'
-                )
+                # Detect interactive prompts in output (pacman, dpkg, etc.)
+                interactive_markers = ["[Y/n]", "[y/N]", "Do you want to", "(y|n)", "[yes/no]"]
+                has_interactive_prompt = any(marker in (stdout + stderr) for marker in interactive_markers)
+                
+                if has_interactive_prompt:
+                    # Command succeeded but is waiting for user input
+                    prompt_hint = ""
+                    if "pacman" in cmd:
+                        prompt_hint = "Retry with: pacman ... --noconfirm"
+                    elif "apt" in cmd or "dpkg" in cmd:
+                        prompt_hint = "Retry with: apt ... -y or DEBIAN_FRONTEND=noninteractive"
+                    elif "dnf" in cmd or "yum" in cmd:
+                        prompt_hint = "Retry with: dnf ... -y"
+                    
+                    feedback = (
+                        f"RESULT: Waiting for user input\n"
+                        f"Command: {cmd}\nstdout:\n{stdout}\nstderr:\n{stderr}\n\n"
+                        f"The command is asking for confirmation. {prompt_hint}\n"
+                        "Retry the command with non-interactive flags (--noconfirm, -y, etc) to avoid this.\n"
+                        "Reply JSON only."
+                    )
+                else:
+                    # Detect silent download failures (tiny file = error page, not real content)
+                    silent_fail_hint = ""
+                    if any(x in cmd for x in ["curl","wget"]) and "http" in cmd:
+                        silent_fail_hint = (
+                            "\nIMPORTANT: If this was a download, check the file size with ls -lh. "
+                            "A file smaller than 1 KB means the download FAILED (got an error page). "
+                            "If so, search the web for the correct direct download URL and retry."
+                        )
+                    feedback=(
+                        f"RESULT: SUCCESS\nCommand: {cmd}\nstdout:\n{stdout}\nstderr:\n{stderr}\n\n"
+                        + silent_fail_hint +
+                        "\nIs the full task now complete?\n"
+                        '- Yes: {"action":"done","summary":"..."}\n'
+                        '- No:  next command as JSON. Do NOT ask questions.'
+                    )
             else:
                 feedback=(
                     f"RESULT: FAILED (exit {result['returncode']})\n"
                     f"Command: {cmd}\nstdout:\n{stdout}\nstderr:\n{stderr}\n\n"
-                    "Do NOT repeat this command.\n"
-                    "Try something simpler. For file moves use:\n"
-                    '{"action":"run","command":"for f in /path/*.ext; do mv \\"$f\\" /dest/; done","reason":"..."}\n'
-                    "JSON only."
+                    "FAILED. Do NOT repeat this command.\n"
+                    "Options:\n"
+                    "1. Search the web for this error to find the correct approach.\n"
+                    "2. Try a simpler alternative command.\n"
+                    "3. If the URL/package was guessed, search for the real one.\n"
+                    "Reply JSON only."
                 )
             messages += [{"role":"assistant","content":raw},
                          {"role":"user","content":feedback}]
